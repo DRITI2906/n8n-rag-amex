@@ -18,7 +18,7 @@ from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from config import get_settings
-from db.connection import get_conn
+from db.connection import get_conn, get_pool
 from services.retriever import search, SearchResult
 from services.llm import generate
 
@@ -208,18 +208,24 @@ async def _stream_response(
 
     generation_ms = int((time.monotonic() - t1) * 1000)
 
-    await _log_query(
-        conn=conn,
-        question=question,
-        answer=full_answer,
-        sources=chunks,
-        retrieval_ms=retrieval_ms,
-        generation_ms=generation_ms,
-        model_used=model_used,
-        top_k=len(chunks),
-        user_id=user_id,
-        query_id=query_id,
-    )
+    # Acquire a fresh connection — the FastAPI DI conn is released once the
+    # handler returns the EventSourceResponse, before the generator finishes.
+    try:
+        async with get_pool().acquire() as log_conn:
+            await _log_query(
+                conn=log_conn,
+                question=question,
+                answer=full_answer,
+                sources=chunks,
+                retrieval_ms=retrieval_ms,
+                generation_ms=generation_ms,
+                model_used=model_used,
+                top_k=len(chunks),
+                user_id=user_id,
+                query_id=query_id,
+            )
+    except Exception as e:
+        print(f"[query] Failed to log query: {e}")
 
     yield {"event": "done", "data": json.dumps({"generation_time_ms": generation_ms})}
 
@@ -269,6 +275,6 @@ async def _log_query(
         ON CONFLICT (query_id) DO NOTHING
         """,
         qid, user_id, question, answer,
-        json.dumps(sources), retrieval_ms, generation_ms, model_used, top_k,
+        sources, retrieval_ms, generation_ms, model_used, top_k,
     )
     return qid

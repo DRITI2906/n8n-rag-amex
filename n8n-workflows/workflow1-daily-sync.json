@@ -1,5 +1,5 @@
-{
-  "name": "Workflow 1 — Daily Document Sync & Index",
+﻿{
+  "name": "Workflow 1 â€” Daily Document Sync & Index",
   "nodes": [
     {
       "parameters": {
@@ -25,12 +25,12 @@
       "parameters": {
         "authentication": "oAuth2",
         "operation": "list",
-        "folderId": "={{ $vars.GOOGLE_DRIVE_FOLDER_ID }}",
+        "folderId": "={{ YOUR_FOLDER_ID }}",
         "returnAll": true,
         "options": { "fields": "id,name,mimeType,modifiedTime,createdTime" }
       },
       "id": "node-gdrive-list",
-      "name": "Google Drive — List Files",
+      "name": "Google Drive â€” List Files",
       "type": "n8n-nodes-base.googleDrive",
       "typeVersion": 3,
       "position": [500, 100],
@@ -44,7 +44,7 @@
         "fileId": "={{ $json.id }}"
       },
       "id": "node-gdrive-download",
-      "name": "Google Drive — Download File",
+      "name": "Google Drive â€” Download File",
       "type": "n8n-nodes-base.googleDrive",
       "typeVersion": 3,
       "position": [700, 100],
@@ -54,11 +54,11 @@
       "parameters": {
         "resource": "conversations",
         "operation": "getAll",
-        "channelId": "={{ $vars.SLACK_DOCS_CHANNEL_ID }}",
+        "channelId": "={{ YOUR_CHANNEL_ID }}",
         "returnAll": true
       },
       "id": "node-slack-messages",
-      "name": "Slack — Get Pinned Messages",
+      "name": "Slack â€” Get Pinned Messages",
       "type": "n8n-nodes-base.slack",
       "typeVersion": 2,
       "position": [500, 300],
@@ -71,7 +71,7 @@
         "returnAll": true
       },
       "id": "node-notion-pages",
-      "name": "Notion — Get Pages",
+      "name": "Notion â€” Get Pages",
       "type": "n8n-nodes-base.notion",
       "typeVersion": 2,
       "position": [500, 500],
@@ -101,7 +101,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ $vars.RAG_BACKEND_URL }}/parse_document",
+        "url": "http://backend:8000/parse_document",
         "sendBody": true,
         "contentType": "multipart-form-data",
         "bodyParameters": {
@@ -136,7 +136,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ $vars.RAG_BACKEND_URL }}/chunk_document",
+        "url": "http://backend:8000/chunk_document",
         "sendBody": true,
         "contentType": "json",
         "body": "={{ JSON.stringify({ doc_id: $json.doc_id, max_tokens: 512, overlap_tokens: 100 }) }}",
@@ -151,7 +151,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ $vars.RAG_BACKEND_URL }}/embed_chunks",
+        "url": "http://backend:8000/embed_chunks",
         "sendBody": true,
         "contentType": "json",
         "body": "={{ JSON.stringify({ doc_id: $json.doc_id }) }}",
@@ -181,10 +181,10 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ $vars.SLACK_WEBHOOK_URL }}",
+        "url": "",
         "sendBody": true,
         "contentType": "json",
-        "body": "={{ JSON.stringify({ text: `✅ Daily RAG Sync Done\\nDocs added: ${$node['Embed Chunks'].json.embedded}\\nChunks: ${$node['Chunk Document'].json.chunks_created}\\nTimestamp: ${new Date().toISOString()}` }) }}",
+        "body": "={{ JSON.stringify({ text: `âœ… Daily RAG Sync Done\\nDocs added: ${$node['Embed Chunks'].json.embedded}\\nChunks: ${$node['Chunk Document'].json.chunks_created}\\nTimestamp: ${new Date().toISOString()}` }) }}",
         "options": {}
       },
       "id": "node-slack-notify",
@@ -196,10 +196,10 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ $vars.SLACK_WEBHOOK_URL }}",
+        "url": "",
         "sendBody": true,
         "contentType": "json",
-        "body": "={{ JSON.stringify({ text: `❌ RAG Sync Error on node: ${$execution.lastNode}\\nError: ${$json.error?.message || 'unknown'}` }) }}",
+        "body": "={{ JSON.stringify({ text: `âŒ RAG Sync Error on node: ${$execution.lastNode}\\nError: ${$json.error?.message || 'unknown'}` }) }}",
         "options": {}
       },
       "id": "node-error-notify",
@@ -214,16 +214,16 @@
     "Initialise Run": {
       "main": [
         [
-          { "node": "Google Drive — List Files", "type": "main", "index": 0 },
-          { "node": "Slack — Get Pinned Messages", "type": "main", "index": 0 },
-          { "node": "Notion — Get Pages", "type": "main", "index": 0 }
+          { "node": "Google Drive â€” List Files", "type": "main", "index": 0 },
+          { "node": "Slack â€” Get Pinned Messages", "type": "main", "index": 0 },
+          { "node": "Notion â€” Get Pages", "type": "main", "index": 0 }
         ]
       ]
     },
-    "Google Drive — List Files": { "main": [[{ "node": "Google Drive — Download File", "type": "main", "index": 0 }]] },
-    "Google Drive — Download File": { "main": [[{ "node": "Normalise Documents", "type": "main", "index": 0 }]] },
-    "Slack — Get Pinned Messages": { "main": [[{ "node": "Normalise Documents", "type": "main", "index": 0 }]] },
-    "Notion — Get Pages": { "main": [[{ "node": "Normalise Documents", "type": "main", "index": 0 }]] },
+    "Google Drive â€” List Files": { "main": [[{ "node": "Google Drive â€” Download File", "type": "main", "index": 0 }]] },
+    "Google Drive â€” Download File": { "main": [[{ "node": "Normalise Documents", "type": "main", "index": 0 }]] },
+    "Slack â€” Get Pinned Messages": { "main": [[{ "node": "Normalise Documents", "type": "main", "index": 0 }]] },
+    "Notion â€” Get Pages": { "main": [[{ "node": "Normalise Documents", "type": "main", "index": 0 }]] },
     "Normalise Documents": { "main": [[{ "node": "Process One By One", "type": "main", "index": 0 }]] },
     "Process One By One": { "main": [[{ "node": "Parse Document", "type": "main", "index": 0 }]] },
     "Parse Document": { "main": [[{ "node": "Already Indexed?", "type": "main", "index": 0 }]] },
@@ -243,3 +243,5 @@
   "id": "wf-daily-sync-001",
   "tags": [{ "name": "rag", "createdAt": "2024-01-01T00:00:00.000Z" }]
 }
+
+

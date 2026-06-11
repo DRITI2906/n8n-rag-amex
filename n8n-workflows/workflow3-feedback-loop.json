@@ -1,5 +1,5 @@
-{
-  "name": "Workflow 3 — Quality Feedback Loop",
+﻿{
+  "name": "Workflow 3 â€” Quality Feedback Loop",
   "nodes": [
     {
       "parameters": {
@@ -28,7 +28,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ $vars.RAG_BACKEND_URL }}/query/feedback",
+        "url": "http://backend:8000/query/feedback",
         "sendBody": true,
         "contentType": "json",
         "body": "={{ JSON.stringify($json) }}",
@@ -93,10 +93,10 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ $vars.SLACK_WEBHOOK_URL }}",
+        "url": "",
         "sendBody": true,
         "contentType": "json",
-        "body": "={{ JSON.stringify({ text: `📊 *Weekly RAG Quality Report*\\n\\n• Total feedback: ${$json.total}\\n• 👍 Thumbs up: ${$json.thumbsUp} (${$json.satisfaction}% satisfaction)\\n• 👎 Thumbs down: ${$json.thumbsDown}\\n\\n*Top 5 failing queries:*\\n${$json.topFailing.map((f,i) => `${i+1}. \"${f[0]}\" (${f[1]} downvotes)`).join('\\n') || 'None this week — great job!'}` }) }}",
+        "body": "={{ JSON.stringify({ text: `ðŸ“Š *Weekly RAG Quality Report*\\n\\nâ€¢ Total feedback: ${$json.total}\\nâ€¢ ðŸ‘ Thumbs up: ${$json.thumbsUp} (${$json.satisfaction}% satisfaction)\\nâ€¢ ðŸ‘Ž Thumbs down: ${$json.thumbsDown}\\n\\n*Top 5 failing queries:*\\n${$json.topFailing.map((f,i) => `${i+1}. \"${f[0]}\" (${f[1]} downvotes)`).join('\\n') || 'None this week â€” great job!'}` }) }}",
         "options": {}
       },
       "id": "node-weekly-report",
@@ -120,3 +120,5 @@
   "id": "wf-feedback-loop-003",
   "tags": [{ "name": "rag" }]
 }
+
+

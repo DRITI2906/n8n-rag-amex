@@ -156,13 +156,14 @@ async def _complete_ollama(messages: list[dict]) -> str:
     import httpx
 
     full_messages = [{"role": "system", "content": _SYSTEM_PROMPT}, *messages]
-    async with httpx.AsyncClient(timeout=120) as client:
+    async with httpx.AsyncClient(timeout=300) as client:
         resp = await client.post(
             f"{_settings.OLLAMA_BASE_URL}/api/chat",
             json={
                 "model": _settings.OLLAMA_MODEL,
                 "messages": full_messages,
                 "stream": False,
+                "options": {"num_predict": 400, "num_ctx": 4096, "temperature": 0.1},
             },
         )
         resp.raise_for_status()
@@ -173,7 +174,7 @@ async def _stream_ollama(messages: list[dict]) -> AsyncGenerator[str, None]:
     import httpx
 
     full_messages = [{"role": "system", "content": _SYSTEM_PROMPT}, *messages]
-    async with httpx.AsyncClient(timeout=120) as client:
+    async with httpx.AsyncClient(timeout=600) as client:
         async with client.stream(
             "POST",
             f"{_settings.OLLAMA_BASE_URL}/api/chat",
@@ -181,6 +182,7 @@ async def _stream_ollama(messages: list[dict]) -> AsyncGenerator[str, None]:
                 "model": _settings.OLLAMA_MODEL,
                 "messages": full_messages,
                 "stream": True,
+                "options": {"num_predict": 400, "num_ctx": 4096, "temperature": 0.1},
             },
         ) as resp:
             resp.raise_for_status()

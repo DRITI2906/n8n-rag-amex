@@ -1,5 +1,5 @@
-{
-  "name": "Workflow 2 — On-Demand Query (/ask)",
+﻿{
+  "name": "Workflow 2 â€” On-Demand Query (/ask)",
   "nodes": [
     {
       "parameters": {
@@ -28,7 +28,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ $vars.RAG_BACKEND_URL }}/query",
+        "url": "http://backend:8000/query",
         "sendBody": true,
         "contentType": "json",
         "body": "={{ JSON.stringify({ question: $json.question, user_id: $json.user_id, top_k: $json.top_k, source: $json.source, provider: $json.provider, stream: false }) }}",
@@ -76,7 +76,7 @@
         "options": { "responseCode": 200 }
       },
       "id": "node-respond-success",
-      "name": "Respond — Success",
+      "name": "Respond â€” Success",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1,
       "position": [1100, 200]
@@ -88,7 +88,7 @@
         "options": { "responseCode": 500 }
       },
       "id": "node-respond-error",
-      "name": "Respond — Error",
+      "name": "Respond â€” Error",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1,
       "position": [900, 400]
@@ -101,10 +101,10 @@
     "Query Succeeded?": {
       "main": [
         [{ "node": "Log Query to DB", "type": "main", "index": 0 }],
-        [{ "node": "Respond — Error", "type": "main", "index": 0 }]
+        [{ "node": "Respond â€” Error", "type": "main", "index": 0 }]
       ]
     },
-    "Log Query to DB": { "main": [[{ "node": "Respond — Success", "type": "main", "index": 0 }]] }
+    "Log Query to DB": { "main": [[{ "node": "Respond â€” Success", "type": "main", "index": 0 }]] }
   },
   "active": false,
   "settings": { "executionOrder": "v1" },
@@ -112,3 +112,5 @@
   "id": "wf-on-demand-query-002",
   "tags": [{ "name": "rag" }]
 }
+
+

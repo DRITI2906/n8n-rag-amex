@@ -82,13 +82,13 @@ async def parse_doc(
         parsed.creation_date,
         parsed.modified_date,
         parsed.raw_size,
-        json.dumps(parsed.metadata),
+        parsed.metadata,
     )
 
     # Store full parsed text in metadata for chunking step
     await conn.execute(
         "UPDATE documents SET metadata = metadata || $1::jsonb WHERE doc_id = $2::uuid",
-        json.dumps({"parsed_text": parsed.text}),
+        {"parsed_text": parsed.text},
         doc_id,
     )
 

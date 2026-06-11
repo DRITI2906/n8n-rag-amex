@@ -37,7 +37,8 @@ async def chunk_doc(
     if not row:
         raise HTTPException(status_code=404, detail=f"Document {req.doc_id} not found")
 
-    metadata = dict(row["metadata"] or {})
+    raw = row["metadata"]
+    metadata = json.loads(raw) if isinstance(raw, str) else (dict(raw) if raw else {})
     text = metadata.get("parsed_text")
     if not text:
         raise HTTPException(
@@ -69,7 +70,7 @@ async def chunk_doc(
                 """,
                 req.doc_id, c.chunk_index, c.chunk_text, c.token_count,
                 c.char_start, c.char_end, c.parent_heading, c.parent_section,
-                json.dumps(c.metadata),
+                c.metadata if isinstance(c.metadata, dict) else {},
             )
             chunk_ids.append(cid)
 

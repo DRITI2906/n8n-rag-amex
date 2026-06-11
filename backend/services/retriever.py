@@ -172,6 +172,13 @@ def _rrf_fuse(
     return results
 
 
+def _parse_jsonb(val) -> dict:
+    import json
+    if isinstance(val, str):
+        return json.loads(val) if val else {}
+    return dict(val) if val else {}
+
+
 def _row_to_result(row) -> SearchResult:
     return SearchResult(
         chunk_id=row["chunk_id"],
@@ -181,6 +188,6 @@ def _row_to_result(row) -> SearchResult:
         doc_title=row["doc_title"],
         source=row["source"],
         parent_heading=row["parent_heading"] or "",
-        chunk_metadata=dict(row["chunk_metadata"] or {}),
-        doc_metadata=dict(row["doc_metadata"] or {}),
+        chunk_metadata=_parse_jsonb(row["chunk_metadata"]),
+        doc_metadata=_parse_jsonb(row["doc_metadata"]),
     )
