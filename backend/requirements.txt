@@ -1,0 +1,37 @@
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+asyncpg==0.30.0
+pydantic==2.10.3
+pydantic-settings==2.6.1
+
+# Document parsing
+pdfplumber==0.11.4
+python-docx==1.1.2
+python-pptx==1.0.2
+markdownify==0.13.1
+beautifulsoup4==4.12.3
+lxml==5.3.0
+
+# NLP / chunking
+tiktoken==0.8.0
+nltk==3.9.1
+langdetect==1.0.9
+
+# Embeddings
+sentence-transformers==3.3.1
+numpy==1.26.4
+
+# LLM providers
+anthropic==0.40.0
+openai==1.57.4
+httpx==0.28.1
+
+# Streaming
+sse-starlette==2.1.3
+
+# Utilities
+python-multipart==0.0.20
+tenacity==9.0.0
+aiofiles==24.1.0
+python-magic-bin==0.4.14; sys_platform == "win32"
+python-magic==0.4.27; sys_platform != "win32"

@@ -1,0 +1,31 @@
+# Secrets — never commit these
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+
+# Node / Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Docker volumes (local data)
+postgres_data/
+ollama_data/
+n8n_data/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp

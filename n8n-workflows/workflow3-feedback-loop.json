@@ -1,0 +1,122 @@
+{
+  "name": "Workflow 3 — Quality Feedback Loop",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "feedback",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "node-feedback-webhook",
+      "name": "POST /feedback Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [100, 300],
+      "webhookId": "rag-feedback-webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $json.body || $json;\nif (!body.query_id) throw new Error('Missing query_id');\nif (![1,-1].includes(body.rating)) throw new Error('rating must be 1 or -1');\nreturn [{ json: { query_id: body.query_id, rating: body.rating, user_id: body.user_id || 'anonymous', comment: body.comment || '' } }];"
+      },
+      "id": "node-validate-feedback",
+      "name": "Validate Feedback",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [300, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.RAG_BACKEND_URL }}/query/feedback",
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ JSON.stringify($json) }}",
+        "options": { "timeout": 10000 }
+      },
+      "id": "node-store-feedback",
+      "name": "Store Feedback via API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [500, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\"status\": \"recorded\"}",
+        "options": { "responseCode": 200 }
+      },
+      "id": "node-respond-feedback",
+      "name": "Respond OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [700, 300]
+    },
+    {
+      "parameters": {
+        "rule": { "interval": [{ "field": "cronExpression", "expression": "0 9 * * 1" }] }
+      },
+      "id": "node-weekly-trigger",
+      "name": "Weekly Monday 9 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [100, 600]
+    },
+    {
+      "parameters": {
+        "operation": "select",
+        "schema": "public",
+        "table": "feedback",
+        "additionalFields": {},
+        "options": {
+          "queryBatching": "independently"
+        },
+        "query": "SELECT f.query_id, q.question, f.rating, f.comment, f.created_at FROM feedback f JOIN query_logs q ON f.query_id = q.query_id WHERE f.created_at >= NOW() - INTERVAL '7 days' ORDER BY f.created_at DESC"
+      },
+      "id": "node-fetch-feedback",
+      "name": "Fetch Week Feedback",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [300, 600],
+      "credentials": { "postgres": { "id": "pg-creds", "name": "RAG Postgres" } }
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst total = items.length;\nconst thumbsUp = items.filter(i => i.json.rating === 1).length;\nconst thumbsDown = items.filter(i => i.json.rating === -1).length;\nconst satisfaction = total > 0 ? Math.round((thumbsUp / total) * 100) : 0;\n\n// Find top 5 failing queries (most thumbs-down)\nconst failMap = {};\nfor (const item of items) {\n  if (item.json.rating === -1) {\n    const q = item.json.question;\n    failMap[q] = (failMap[q] || 0) + 1;\n  }\n}\nconst topFailing = Object.entries(failMap).sort((a,b) => b[1]-a[1]).slice(0, 5);\n\nreturn [{ json: { total, thumbsUp, thumbsDown, satisfaction, topFailing } }];"
+      },
+      "id": "node-analyse",
+      "name": "Analyse Feedback",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [500, 600]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.SLACK_WEBHOOK_URL }}",
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ JSON.stringify({ text: `📊 *Weekly RAG Quality Report*\\n\\n• Total feedback: ${$json.total}\\n• 👍 Thumbs up: ${$json.thumbsUp} (${$json.satisfaction}% satisfaction)\\n• 👎 Thumbs down: ${$json.thumbsDown}\\n\\n*Top 5 failing queries:*\\n${$json.topFailing.map((f,i) => `${i+1}. \"${f[0]}\" (${f[1]} downvotes)`).join('\\n') || 'None this week — great job!'}` }) }}",
+        "options": {}
+      },
+      "id": "node-weekly-report",
+      "name": "Send Weekly Report",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [700, 600]
+    }
+  ],
+  "connections": {
+    "POST /feedback Webhook": { "main": [[{ "node": "Validate Feedback", "type": "main", "index": 0 }]] },
+    "Validate Feedback": { "main": [[{ "node": "Store Feedback via API", "type": "main", "index": 0 }]] },
+    "Store Feedback via API": { "main": [[{ "node": "Respond OK", "type": "main", "index": 0 }]] },
+    "Weekly Monday 9 AM": { "main": [[{ "node": "Fetch Week Feedback", "type": "main", "index": 0 }]] },
+    "Fetch Week Feedback": { "main": [[{ "node": "Analyse Feedback", "type": "main", "index": 0 }]] },
+    "Analyse Feedback": { "main": [[{ "node": "Send Weekly Report", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "meta": { "templateCredsSetupCompleted": false },
+  "id": "wf-feedback-loop-003",
+  "tags": [{ "name": "rag" }]
+}

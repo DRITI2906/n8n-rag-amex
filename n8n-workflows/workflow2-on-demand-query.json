@@ -1,0 +1,114 @@
+{
+  "name": "Workflow 2 — On-Demand Query (/ask)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ask",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "node-webhook",
+      "name": "POST /ask Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [100, 300],
+      "webhookId": "rag-ask-webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Validate and extract request fields\nconst body = $json.body || $json;\nif (!body.question) throw new Error('Missing required field: question');\n\nreturn [{\n  json: {\n    question: body.question,\n    user_id: body.user_id || 'anonymous',\n    top_k: body.top_k || 5,\n    source: body.source || null,\n    provider: body.provider || null,\n    stream: false   // n8n uses non-streaming for simplicity\n  }\n}];"
+      },
+      "id": "node-validate",
+      "name": "Validate & Extract",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [300, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.RAG_BACKEND_URL }}/query",
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ JSON.stringify({ question: $json.question, user_id: $json.user_id, top_k: $json.top_k, source: $json.source, provider: $json.provider, stream: false }) }}",
+        "options": { "timeout": 60000, "response": { "response": { "fullResponse": true } } }
+      },
+      "id": "node-rag-query",
+      "name": "Call RAG /query",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [500, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            { "leftValue": "={{ $json.statusCode }}", "rightValue": 200, "operator": { "type": "number", "operation": "equals" } }
+          ]
+        }
+      },
+      "id": "node-check-success",
+      "name": "Query Succeeded?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [700, 300]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": "public",
+        "table": "query_logs",
+        "columns": "query_id,user_id,question,answer,sources,retrieval_ms,generation_ms,model_used",
+        "dataMode": "autoMapInputData"
+      },
+      "id": "node-log-query",
+      "name": "Log Query to DB",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [900, 200],
+      "credentials": { "postgres": { "id": "pg-creds", "name": "RAG Postgres" } }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json.body) }}",
+        "options": { "responseCode": 200 }
+      },
+      "id": "node-respond-success",
+      "name": "Respond — Success",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1100, 200]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ error: 'Query failed', detail: $json.body?.detail || 'Unknown error' }) }}",
+        "options": { "responseCode": 500 }
+      },
+      "id": "node-respond-error",
+      "name": "Respond — Error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [900, 400]
+    }
+  ],
+  "connections": {
+    "POST /ask Webhook": { "main": [[{ "node": "Validate & Extract", "type": "main", "index": 0 }]] },
+    "Validate & Extract": { "main": [[{ "node": "Call RAG /query", "type": "main", "index": 0 }]] },
+    "Call RAG /query": { "main": [[{ "node": "Query Succeeded?", "type": "main", "index": 0 }]] },
+    "Query Succeeded?": {
+      "main": [
+        [{ "node": "Log Query to DB", "type": "main", "index": 0 }],
+        [{ "node": "Respond — Error", "type": "main", "index": 0 }]
+      ]
+    },
+    "Log Query to DB": { "main": [[{ "node": "Respond — Success", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "meta": { "templateCredsSetupCompleted": false },
+  "id": "wf-on-demand-query-002",
+  "tags": [{ "name": "rag" }]
+}
