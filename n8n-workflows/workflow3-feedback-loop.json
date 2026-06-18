@@ -1,5 +1,5 @@
-﻿{
-  "name": "Workflow 3 â€” Quality Feedback Loop",
+{
+  "name": "Workflow 3 – Quality Feedback Loop",
   "nodes": [
     {
       "parameters": {
@@ -32,7 +32,10 @@
         "sendBody": true,
         "contentType": "json",
         "body": "={{ JSON.stringify($json) }}",
-        "options": { "timeout": 10000 }
+        "options": {
+          "timeout": 10000,
+          "response": { "response": { "fullResponse": true } }
+        }
       },
       "id": "node-store-feedback",
       "name": "Store Feedback via API",
@@ -42,15 +45,45 @@
     },
     {
       "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $json.statusCode }}",
+              "rightValue": 200,
+              "operator": { "type": "number", "operation": "equals" }
+            }
+          ]
+        }
+      },
+      "id": "node-check-store-result",
+      "name": "Store Succeeded?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [700, 300]
+    },
+    {
+      "parameters": {
         "respondWith": "json",
-        "responseBody": "={\"status\": \"recorded\"}",
+        "responseBody": "{\"status\": \"recorded\"}",
         "options": { "responseCode": 200 }
       },
       "id": "node-respond-feedback",
       "name": "Respond OK",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1,
-      "position": [700, 300]
+      "position": [900, 200]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ error: 'Failed to record feedback' }) }}",
+        "options": { "responseCode": 500 }
+      },
+      "id": "node-respond-feedback-error",
+      "name": "Respond – Store Error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [900, 400]
     },
     {
       "parameters": {
@@ -64,13 +97,7 @@
     },
     {
       "parameters": {
-        "operation": "select",
-        "schema": "public",
-        "table": "feedback",
-        "additionalFields": {},
-        "options": {
-          "queryBatching": "independently"
-        },
+        "operation": "executeQuery",
         "query": "SELECT f.query_id, q.question, f.rating, f.comment, f.created_at FROM feedback f JOIN query_logs q ON f.query_id = q.query_id WHERE f.created_at >= NOW() - INTERVAL '7 days' ORDER BY f.created_at DESC"
       },
       "id": "node-fetch-feedback",
@@ -82,7 +109,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const items = $input.all();\nconst total = items.length;\nconst thumbsUp = items.filter(i => i.json.rating === 1).length;\nconst thumbsDown = items.filter(i => i.json.rating === -1).length;\nconst satisfaction = total > 0 ? Math.round((thumbsUp / total) * 100) : 0;\n\n// Find top 5 failing queries (most thumbs-down)\nconst failMap = {};\nfor (const item of items) {\n  if (item.json.rating === -1) {\n    const q = item.json.question;\n    failMap[q] = (failMap[q] || 0) + 1;\n  }\n}\nconst topFailing = Object.entries(failMap).sort((a,b) => b[1]-a[1]).slice(0, 5);\n\nreturn [{ json: { total, thumbsUp, thumbsDown, satisfaction, topFailing } }];"
+        "jsCode": "const items = $input.all();\n// Deduplicate by query_id, keeping the latest rating per query\nconst ratingMap = new Map();\nconst questionMap = new Map();\nfor (const item of items) {\n  ratingMap.set(item.json.query_id, item.json.rating);\n  questionMap.set(item.json.query_id, item.json.question);\n}\nconst total = ratingMap.size;\nconst uniqueRatings = Array.from(ratingMap.values());\nconst thumbsUp = uniqueRatings.filter(r => r === 1).length;\nconst thumbsDown = uniqueRatings.filter(r => r === -1).length;\nconst satisfaction = total > 0 ? Math.round((thumbsUp / total) * 100) : 0;\n\nconst failMap = {};\nfor (const [queryId, rating] of ratingMap.entries()) {\n  if (rating === -1) {\n    const q = questionMap.get(queryId);\n    failMap[q] = (failMap[q] || 0) + 1;\n  }\n}\nconst topFailing = Object.entries(failMap).sort((a,b) => b[1]-a[1]).slice(0, 5);\n\nreturn [{ json: { total, thumbsUp, thumbsDown, satisfaction, topFailing } }];"
       },
       "id": "node-analyse",
       "name": "Analyse Feedback",
@@ -93,10 +120,10 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "",
+        "url": "={{ $env.SLACK_WEBHOOK_URL }}",
         "sendBody": true,
         "contentType": "json",
-        "body": "={{ JSON.stringify({ text: `ðŸ“Š *Weekly RAG Quality Report*\\n\\nâ€¢ Total feedback: ${$json.total}\\nâ€¢ ðŸ‘ Thumbs up: ${$json.thumbsUp} (${$json.satisfaction}% satisfaction)\\nâ€¢ ðŸ‘Ž Thumbs down: ${$json.thumbsDown}\\n\\n*Top 5 failing queries:*\\n${$json.topFailing.map((f,i) => `${i+1}. \"${f[0]}\" (${f[1]} downvotes)`).join('\\n') || 'None this week â€” great job!'}` }) }}",
+        "body": "={{ JSON.stringify({ text: `📊 *Weekly RAG Quality Report*\\n\\n• Total feedback: ${$json.total}\\n• 👍 Thumbs up: ${$json.thumbsUp} (${$json.satisfaction}% satisfaction)\\n• 👎 Thumbs down: ${$json.thumbsDown}\\n\\n*Top 5 failing queries:*\\n${$json.topFailing.map((f,i) => `${i+1}. \"${f[0]}\" (${f[1]} downvotes)`).join('\\n') || 'None this week – great job!'}` }) }}",
         "options": {}
       },
       "id": "node-weekly-report",
@@ -109,7 +136,13 @@
   "connections": {
     "POST /feedback Webhook": { "main": [[{ "node": "Validate Feedback", "type": "main", "index": 0 }]] },
     "Validate Feedback": { "main": [[{ "node": "Store Feedback via API", "type": "main", "index": 0 }]] },
-    "Store Feedback via API": { "main": [[{ "node": "Respond OK", "type": "main", "index": 0 }]] },
+    "Store Feedback via API": { "main": [[{ "node": "Store Succeeded?", "type": "main", "index": 0 }]] },
+    "Store Succeeded?": {
+      "main": [
+        [{ "node": "Respond OK", "type": "main", "index": 0 }],
+        [{ "node": "Respond – Store Error", "type": "main", "index": 0 }]
+      ]
+    },
     "Weekly Monday 9 AM": { "main": [[{ "node": "Fetch Week Feedback", "type": "main", "index": 0 }]] },
     "Fetch Week Feedback": { "main": [[{ "node": "Analyse Feedback", "type": "main", "index": 0 }]] },
     "Analyse Feedback": { "main": [[{ "node": "Send Weekly Report", "type": "main", "index": 0 }]] }
@@ -120,5 +153,3 @@
   "id": "wf-feedback-loop-003",
   "tags": [{ "name": "rag" }]
 }
-
-

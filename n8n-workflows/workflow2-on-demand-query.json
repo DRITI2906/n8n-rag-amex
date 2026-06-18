@@ -1,5 +1,5 @@
-﻿{
-  "name": "Workflow 2 â€” On-Demand Query (/ask)",
+{
+  "name": "Workflow 2 – On-Demand Query (/ask)",
   "nodes": [
     {
       "parameters": {
@@ -17,7 +17,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Validate and extract request fields\nconst body = $json.body || $json;\nif (!body.question) throw new Error('Missing required field: question');\n\nreturn [{\n  json: {\n    question: body.question,\n    user_id: body.user_id || 'anonymous',\n    top_k: body.top_k || 5,\n    source: body.source || null,\n    provider: body.provider || null,\n    stream: false   // n8n uses non-streaming for simplicity\n  }\n}];"
+        "jsCode": "const body = $json.body || $json;\nif (!body.question) {\n  return [{\n    json: {\n      _validationError: true,\n      errorMessage: 'Missing required field: question',\n      statusCode: 400\n    }\n  }];\n}\nreturn [{\n  json: {\n    question: body.question,\n    user_id: body.user_id || 'anonymous',\n    top_k: body.top_k || 5,\n    source: body.source || null,\n    provider: body.provider || null,\n    stream: false\n  }\n}];"
       },
       "id": "node-validate",
       "name": "Validate & Extract",
@@ -27,18 +27,48 @@
     },
     {
       "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $json._validationError }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ]
+        }
+      },
+      "id": "node-validate-check",
+      "name": "Has Validation Error?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [500, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ error: $json.errorMessage }) }}",
+        "options": { "responseCode": 400 }
+      },
+      "id": "node-respond-validation-error",
+      "name": "Respond – Validation Error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [700, 400]
+    },
+    {
+      "parameters": {
         "method": "POST",
         "url": "http://backend:8000/query",
         "sendBody": true,
         "contentType": "json",
         "body": "={{ JSON.stringify({ question: $json.question, user_id: $json.user_id, top_k: $json.top_k, source: $json.source, provider: $json.provider, stream: false }) }}",
-        "options": { "timeout": 60000, "response": { "response": { "fullResponse": true } } }
+        "options": { "timeout": 120000, "response": { "response": { "fullResponse": true } } }
       },
       "id": "node-rag-query",
       "name": "Call RAG /query",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [500, 300]
+      "position": [700, 200]
     },
     {
       "parameters": {
@@ -52,22 +82,7 @@
       "name": "Query Succeeded?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
-      "position": [700, 300]
-    },
-    {
-      "parameters": {
-        "operation": "insert",
-        "schema": "public",
-        "table": "query_logs",
-        "columns": "query_id,user_id,question,answer,sources,retrieval_ms,generation_ms,model_used",
-        "dataMode": "autoMapInputData"
-      },
-      "id": "node-log-query",
-      "name": "Log Query to DB",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2,
-      "position": [900, 200],
-      "credentials": { "postgres": { "id": "pg-creds", "name": "RAG Postgres" } }
+      "position": [900, 200]
     },
     {
       "parameters": {
@@ -76,10 +91,10 @@
         "options": { "responseCode": 200 }
       },
       "id": "node-respond-success",
-      "name": "Respond â€” Success",
+      "name": "Respond – Success",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1,
-      "position": [1100, 200]
+      "position": [1100, 100]
     },
     {
       "parameters": {
@@ -88,23 +103,28 @@
         "options": { "responseCode": 500 }
       },
       "id": "node-respond-error",
-      "name": "Respond â€” Error",
+      "name": "Respond – Error",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1,
-      "position": [900, 400]
+      "position": [1100, 300]
     }
   ],
   "connections": {
     "POST /ask Webhook": { "main": [[{ "node": "Validate & Extract", "type": "main", "index": 0 }]] },
-    "Validate & Extract": { "main": [[{ "node": "Call RAG /query", "type": "main", "index": 0 }]] },
+    "Validate & Extract": { "main": [[{ "node": "Has Validation Error?", "type": "main", "index": 0 }]] },
+    "Has Validation Error?": {
+      "main": [
+        [{ "node": "Respond – Validation Error", "type": "main", "index": 0 }],
+        [{ "node": "Call RAG /query", "type": "main", "index": 0 }]
+      ]
+    },
     "Call RAG /query": { "main": [[{ "node": "Query Succeeded?", "type": "main", "index": 0 }]] },
     "Query Succeeded?": {
       "main": [
-        [{ "node": "Log Query to DB", "type": "main", "index": 0 }],
-        [{ "node": "Respond â€” Error", "type": "main", "index": 0 }]
+        [{ "node": "Respond – Success", "type": "main", "index": 0 }],
+        [{ "node": "Respond – Error", "type": "main", "index": 0 }]
       ]
-    },
-    "Log Query to DB": { "main": [[{ "node": "Respond â€” Success", "type": "main", "index": 0 }]] }
+    }
   },
   "active": false,
   "settings": { "executionOrder": "v1" },
@@ -112,5 +132,3 @@
   "id": "wf-on-demand-query-002",
   "tags": [{ "name": "rag" }]
 }
-
-

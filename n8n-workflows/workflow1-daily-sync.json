@@ -1,5 +1,5 @@
-﻿{
-  "name": "Workflow 1 â€” Daily Document Sync & Index",
+{
+  "name": "Workflow 1 – Daily Document Sync & Index",
   "nodes": [
     {
       "parameters": {
@@ -25,12 +25,12 @@
       "parameters": {
         "authentication": "oAuth2",
         "operation": "list",
-        "folderId": "={{ YOUR_FOLDER_ID }}",
+        "folderId": "={{ $env.GOOGLE_DRIVE_FOLDER_ID }}",
         "returnAll": true,
         "options": { "fields": "id,name,mimeType,modifiedTime,createdTime" }
       },
       "id": "node-gdrive-list",
-      "name": "Google Drive â€” List Files",
+      "name": "Google Drive – List Files",
       "type": "n8n-nodes-base.googleDrive",
       "typeVersion": 3,
       "position": [500, 100],
@@ -44,7 +44,7 @@
         "fileId": "={{ $json.id }}"
       },
       "id": "node-gdrive-download",
-      "name": "Google Drive â€” Download File",
+      "name": "Google Drive – Download File",
       "type": "n8n-nodes-base.googleDrive",
       "typeVersion": 3,
       "position": [700, 100],
@@ -52,17 +52,37 @@
     },
     {
       "parameters": {
-        "resource": "conversations",
-        "operation": "getAll",
-        "channelId": "={{ YOUR_CHANNEL_ID }}",
-        "returnAll": true
+        "method": "GET",
+        "url": "https://slack.com/api/pins.list",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "channel", "value": "={{ $env.SLACK_CHANNEL_ID }}" }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.SLACK_BOT_TOKEN }}" }
+          ]
+        },
+        "options": {}
       },
       "id": "node-slack-messages",
-      "name": "Slack â€” Get Pinned Messages",
-      "type": "n8n-nodes-base.slack",
+      "name": "Slack – Get Pinned Messages",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [500, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $json;\nif (!response.ok || !Array.isArray(response.items)) return [];\nreturn response.items\n  .filter(item => item.type === 'message' && item.message)\n  .map(item => ({\n    json: {\n      ts: item.message.ts,\n      text: item.message.text || '',\n      user: item.message.user,\n      channel: item.channel\n    }\n  }));"
+      },
+      "id": "node-parse-pins",
+      "name": "Parse Pins Response",
+      "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [500, 300],
-      "credentials": { "slackApi": { "id": "slack-creds", "name": "Slack API" } }
+      "position": [700, 300]
     },
     {
       "parameters": {
@@ -71,7 +91,7 @@
         "returnAll": true
       },
       "id": "node-notion-pages",
-      "name": "Notion â€” Get Pages",
+      "name": "Notion – Get Pages",
       "type": "n8n-nodes-base.notion",
       "typeVersion": 2,
       "position": [500, 500],
@@ -79,7 +99,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Normalise all sources into a unified format\nconst items = [];\nfor (const item of $input.all()) {\n  const data = item.json;\n  items.push({\n    json: {\n      file_id: data.id || data.ts || data.page_id || String(Date.now()),\n      source: data._source || 'upload',\n      content: data.content || data.text || data.body || '',\n      mime_type: data.mimeType || 'text/plain',\n      title: data.name || data.title || '',\n      binary: item.binary\n    }\n  });\n}\nreturn items;"
+        "jsCode": "const items = [];\nfor (const item of $input.all()) {\n  const data = item.json;\n  let source;\n  if (data.mimeType !== undefined) {\n    source = 'google_drive';\n  } else if (data.ts !== undefined) {\n    source = 'slack';\n  } else if (data.object === 'page' || data.page_id !== undefined) {\n    source = 'notion';\n  } else {\n    source = 'upload';\n  }\n  const file_id = data.id || data.ts || data.page_id ||\n    `${source}_${(data.name || data.title || '').replace(/\\s+/g, '_')}_${data.modifiedTime || data.last_edited_time || ''}`.substring(0, 64);\n  const outputItem = {\n    json: {\n      file_id,\n      source,\n      content: data.content || data.text || data.body || '',\n      mime_type: data.mimeType || 'text/plain',\n      title: data.name || data.title || ''\n    }\n  };\n  if (item.binary) {\n    outputItem.binary = item.binary;\n  }\n  items.push(outputItem);\n}\nreturn items;"
       },
       "id": "node-normalise",
       "name": "Normalise Documents",
@@ -107,7 +127,8 @@
         "bodyParameters": {
           "parameters": [
             { "name": "source", "value": "={{ $json.source }}" },
-            { "name": "file_id", "value": "={{ $json.file_id }}" }
+            { "name": "file_id", "value": "={{ $json.file_id }}" },
+            { "name": "file", "value": "", "parameterType": "formBinaryData", "inputDataFieldName": "data" }
           ]
         },
         "options": { "timeout": 60000, "response": { "response": { "fullResponse": false } } }
@@ -161,7 +182,36 @@
       "name": "Embed Chunks",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1900, 200]
+      "position": [1900, 200],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ Boolean($json.error) }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ]
+        }
+      },
+      "id": "node-embed-error-check",
+      "name": "Embed Failed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2100, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{\n  json: {\n    source: 'scheduled',\n    docs_added: 0,\n    chunks_created: 0,\n    status: 'complete',\n    finished_at: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "node-run-summary",
+      "name": "Build Run Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1300, 500]
     },
     {
       "parameters": {
@@ -175,57 +225,61 @@
       "name": "Log Run to DB",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2,
-      "position": [2100, 200],
+      "position": [1500, 500],
       "credentials": { "postgres": { "id": "pg-creds", "name": "RAG Postgres" } }
     },
     {
       "parameters": {
         "method": "POST",
-        "url": "",
+        "url": "={{ $env.SLACK_WEBHOOK_URL }}",
         "sendBody": true,
         "contentType": "json",
-        "body": "={{ JSON.stringify({ text: `âœ… Daily RAG Sync Done\\nDocs added: ${$node['Embed Chunks'].json.embedded}\\nChunks: ${$node['Chunk Document'].json.chunks_created}\\nTimestamp: ${new Date().toISOString()}` }) }}",
+        "body": "={{ JSON.stringify({ text: `✅ Daily RAG Sync Done\\nTimestamp: ${new Date().toISOString()}` }) }}",
         "options": {}
       },
       "id": "node-slack-notify",
       "name": "Slack Notification",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [2300, 200]
+      "position": [1700, 500]
     },
     {
       "parameters": {
         "method": "POST",
-        "url": "",
+        "url": "={{ $env.SLACK_WEBHOOK_URL }}",
         "sendBody": true,
         "contentType": "json",
-        "body": "={{ JSON.stringify({ text: `âŒ RAG Sync Error on node: ${$execution.lastNode}\\nError: ${$json.error?.message || 'unknown'}` }) }}",
+        "body": "={{ JSON.stringify({ text: `❌ RAG Sync Error\\nError: ${$json.error?.message || $json.error || 'unknown'}` }) }}",
         "options": {}
       },
       "id": "node-error-notify",
       "name": "Error Notification",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1700, 500]
+      "position": [2300, 200]
     }
   ],
   "connections": {
     "Daily 2 AM Trigger": { "main": [[{ "node": "Initialise Run", "type": "main", "index": 0 }]] },
     "Initialise Run": {
+      "main": [[
+        { "node": "Google Drive – List Files", "type": "main", "index": 0 },
+        { "node": "Slack – Get Pinned Messages", "type": "main", "index": 0 },
+        { "node": "Notion – Get Pages", "type": "main", "index": 0 }
+      ]]
+    },
+    "Google Drive – List Files": { "main": [[{ "node": "Google Drive – Download File", "type": "main", "index": 0 }]] },
+    "Google Drive – Download File": { "main": [[{ "node": "Normalise Documents", "type": "main", "index": 0 }]] },
+    "Slack – Get Pinned Messages": { "main": [[{ "node": "Parse Pins Response", "type": "main", "index": 0 }]] },
+    "Parse Pins Response": { "main": [[{ "node": "Normalise Documents", "type": "main", "index": 0 }]] },
+    "Notion – Get Pages": { "main": [[{ "node": "Normalise Documents", "type": "main", "index": 0 }]] },
+    "Normalise Documents": { "main": [[{ "node": "Process One By One", "type": "main", "index": 0 }]] },
+    "Process One By One": {
       "main": [
-        [
-          { "node": "Google Drive â€” List Files", "type": "main", "index": 0 },
-          { "node": "Slack â€” Get Pinned Messages", "type": "main", "index": 0 },
-          { "node": "Notion â€” Get Pages", "type": "main", "index": 0 }
-        ]
+        [{ "node": "Parse Document", "type": "main", "index": 0 }],
+        [{ "node": "Build Run Summary", "type": "main", "index": 0 }]
       ]
     },
-    "Google Drive â€” List Files": { "main": [[{ "node": "Google Drive â€” Download File", "type": "main", "index": 0 }]] },
-    "Google Drive â€” Download File": { "main": [[{ "node": "Normalise Documents", "type": "main", "index": 0 }]] },
-    "Slack â€” Get Pinned Messages": { "main": [[{ "node": "Normalise Documents", "type": "main", "index": 0 }]] },
-    "Notion â€” Get Pages": { "main": [[{ "node": "Normalise Documents", "type": "main", "index": 0 }]] },
-    "Normalise Documents": { "main": [[{ "node": "Process One By One", "type": "main", "index": 0 }]] },
-    "Process One By One": { "main": [[{ "node": "Parse Document", "type": "main", "index": 0 }]] },
     "Parse Document": { "main": [[{ "node": "Already Indexed?", "type": "main", "index": 0 }]] },
     "Already Indexed?": {
       "main": [
@@ -234,14 +288,20 @@
       ]
     },
     "Chunk Document": { "main": [[{ "node": "Embed Chunks", "type": "main", "index": 0 }]] },
-    "Embed Chunks": { "main": [[{ "node": "Log Run to DB", "type": "main", "index": 0 }]] },
+    "Embed Chunks": { "main": [[{ "node": "Embed Failed?", "type": "main", "index": 0 }]] },
+    "Embed Failed?": {
+      "main": [
+        [{ "node": "Error Notification", "type": "main", "index": 0 }],
+        [{ "node": "Process One By One", "type": "main", "index": 0 }]
+      ]
+    },
+    "Error Notification": { "main": [[{ "node": "Process One By One", "type": "main", "index": 0 }]] },
+    "Build Run Summary": { "main": [[{ "node": "Log Run to DB", "type": "main", "index": 0 }]] },
     "Log Run to DB": { "main": [[{ "node": "Slack Notification", "type": "main", "index": 0 }]] }
   },
   "active": false,
-  "settings": { "executionOrder": "v1", "errorWorkflow": "workflow1-daily-sync" },
+  "settings": { "executionOrder": "v1" },
   "meta": { "templateCredsSetupCompleted": false },
   "id": "wf-daily-sync-001",
   "tags": [{ "name": "rag", "createdAt": "2024-01-01T00:00:00.000Z" }]
 }
-
-
