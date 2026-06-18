@@ -28,7 +28,7 @@ class Settings(BaseSettings):
 
     # Retrieval
     DEFAULT_TOP_K: int = 5
-    SIMILARITY_THRESHOLD: float = 0.35
+    SIMILARITY_THRESHOLD: float = 0.45
 
 
 @lru_cache

@@ -27,7 +27,7 @@ async def get_embedder():
         async with _model_lock:
             if _hf_model is None:
                 from sentence_transformers import SentenceTransformer
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
                 _hf_model = await loop.run_in_executor(
                     None,
                     lambda: SentenceTransformer(_settings.HF_MODEL_NAME),
@@ -56,7 +56,7 @@ async def _embed_huggingface(texts: list[str], batch_size: int) -> list[list[flo
     if model is None:
         raise RuntimeError("HuggingFace model not loaded")
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     all_vectors: list[list[float]] = []
 
     for i in range(0, len(texts), batch_size):

@@ -5,12 +5,15 @@ Results are fused via Reciprocal Rank Fusion (RRF) and de-duplicated.
 """
 from __future__ import annotations
 
+import asyncio
+import re
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
 import asyncpg
 
+from db.connection import get_pool
 from services.embedder import embed_texts
 
 
@@ -42,6 +45,7 @@ async def search(
     """
     Embed the question, search top-K chunks by vector similarity,
     optionally blend with full-text BM25 results via RRF.
+    Vector and FTS queries run concurrently when use_hybrid=True.
     """
     query_vectors = await embed_texts([question])
     query_vector = query_vectors[0]
@@ -95,8 +99,6 @@ async def search(
         LIMIT {fetch_limit}
     """
 
-    vector_rows = await conn.fetch(vector_sql, *params)
-
     if use_hybrid:
         # Full-text search with same filters (skip vector params $1, $2)
         ft_where = " AND ".join(
@@ -122,13 +124,21 @@ async def search(
             ORDER BY score DESC
             LIMIT {fetch_limit}
         """
-        try:
-            ft_rows = await conn.fetch(ft_sql, question, *ft_params)
-        except Exception:
-            ft_rows = []
 
+        # Run vector and FTS queries concurrently on separate connections.
+        pool = get_pool()
+        async with pool.acquire() as ft_conn:
+            results_pair = await asyncio.gather(
+                conn.fetch(vector_sql, *params),
+                ft_conn.fetch(ft_sql, question, *ft_params),
+                return_exceptions=True,
+            )
+
+        vector_rows = results_pair[0] if not isinstance(results_pair[0], Exception) else []
+        ft_rows = results_pair[1] if not isinstance(results_pair[1], Exception) else []
         results = _rrf_fuse(vector_rows, ft_rows, top_k=top_k)
     else:
+        vector_rows = await conn.fetch(vector_sql, *params)
         results = [_row_to_result(r) for r in vector_rows[:top_k]]
 
     return results
@@ -136,7 +146,6 @@ async def search(
 
 def ft_sql_where(where: str, offset: int) -> str:
     """Re-number $N params in the FT where clause, skipping the first `offset` positions."""
-    import re
     def replace(m):
         n = int(m.group(1))
         return f"${n + offset - 2}"
@@ -172,14 +181,8 @@ def _rrf_fuse(
     return results
 
 
-def _parse_jsonb(val) -> dict:
-    import json
-    if isinstance(val, str):
-        return json.loads(val) if val else {}
-    return dict(val) if val else {}
-
-
 def _row_to_result(row) -> SearchResult:
+    # asyncpg's JSONB codec already decodes these as dicts; just guard against NULL.
     return SearchResult(
         chunk_id=row["chunk_id"],
         chunk_text=row["chunk_text"],
@@ -188,6 +191,6 @@ def _row_to_result(row) -> SearchResult:
         doc_title=row["doc_title"],
         source=row["source"],
         parent_heading=row["parent_heading"] or "",
-        chunk_metadata=_parse_jsonb(row["chunk_metadata"]),
-        doc_metadata=_parse_jsonb(row["doc_metadata"]),
+        chunk_metadata=row["chunk_metadata"] or {},
+        doc_metadata=row["doc_metadata"] or {},
     )

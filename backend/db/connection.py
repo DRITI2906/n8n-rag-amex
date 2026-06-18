@@ -7,13 +7,15 @@ _pool: asyncpg.Pool | None = None
 
 
 async def _init_conn(conn: asyncpg.Connection) -> None:
-    """Register JSON codecs so asyncpg encodes/decodes JSONB as Python dicts."""
+    """Register JSON codecs and tune HNSW search on every new pool connection."""
     await conn.set_type_codec(
         "jsonb", encoder=json.dumps, decoder=json.loads, schema="pg_catalog"
     )
     await conn.set_type_codec(
         "json", encoder=json.dumps, decoder=json.loads, schema="pg_catalog"
     )
+    # Wider beam = better recall with only ~15% more search time vs default of 40.
+    await conn.execute("SET hnsw.ef_search = 80")
 
 
 async def init_pool() -> None:
@@ -21,7 +23,12 @@ async def init_pool() -> None:
     settings = get_settings()
     # asyncpg wants a raw postgres:// URL, not the SQLAlchemy +asyncpg variant
     dsn = settings.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
-    _pool = await asyncpg.create_pool(dsn=dsn, min_size=2, max_size=10, init=_init_conn)
+    _pool = await asyncpg.create_pool(
+        dsn=dsn,
+        min_size=5,
+        max_size=20,
+        init=_init_conn,
+    )
 
 
 async def close_pool() -> None:

@@ -31,6 +31,13 @@ class EmbedResponse(BaseModel):
     failed: int
 
 
+def _build_embedding_text(chunk_text: str, parent_heading: str | None) -> str:
+    """Prepend the section heading to give the embedding richer context."""
+    if parent_heading and parent_heading.strip():
+        return f"{parent_heading.strip()}\n\n{chunk_text}"
+    return chunk_text
+
+
 @router.post("", response_model=EmbedResponse)
 async def embed_chunks(
     req: EmbedRequest,
@@ -38,13 +45,17 @@ async def embed_chunks(
 ):
     if req.chunk_ids:
         rows = await conn.fetch(
-            "SELECT chunk_id::text, chunk_text FROM document_chunks WHERE chunk_id = ANY($1::uuid[])",
+            """
+            SELECT chunk_id::text, chunk_text, parent_heading
+            FROM document_chunks
+            WHERE chunk_id = ANY($1::uuid[])
+            """,
             req.chunk_ids,
         )
     elif req.doc_id:
         rows = await conn.fetch(
             """
-            SELECT dc.chunk_id::text, dc.chunk_text
+            SELECT dc.chunk_id::text, dc.chunk_text, dc.parent_heading
             FROM document_chunks dc
             LEFT JOIN chunk_embeddings ce ON dc.chunk_id = ce.chunk_id
             WHERE dc.doc_id = $1::uuid AND ce.chunk_id IS NULL
@@ -57,8 +68,14 @@ async def embed_chunks(
     if not rows:
         return EmbedResponse(embedded=0, skipped_cached=0, failed=0)
 
-    # Check cache: skip chunks whose text_hash already exists
-    text_hashes = {r["chunk_id"]: compute_text_hash(r["chunk_text"]) for r in rows}
+    # Hash the enriched text (heading + body) so that heading changes also
+    # invalidate the cache and trigger a re-embed.
+    enriched_texts = {
+        r["chunk_id"]: _build_embedding_text(r["chunk_text"], r.get("parent_heading"))
+        for r in rows
+    }
+    text_hashes = {cid: compute_text_hash(text) for cid, text in enriched_texts.items()}
+
     existing = await conn.fetch(
         "SELECT text_hash FROM chunk_embeddings WHERE text_hash = ANY($1::text[])",
         list(text_hashes.values()),
@@ -73,7 +90,7 @@ async def embed_chunks(
 
     for i in range(0, len(to_embed), req.batch_size):
         batch = to_embed[i : i + req.batch_size]
-        texts = [r["chunk_text"] for r in batch]
+        texts = [enriched_texts[r["chunk_id"]] for r in batch]
 
         try:
             vectors = await embed_texts(texts, batch_size=req.batch_size)
@@ -91,8 +108,9 @@ async def embed_chunks(
                     VALUES ($1::uuid, $2, $3::vector, $4)
                     ON CONFLICT (chunk_id) DO UPDATE SET
                         embedding_vector = EXCLUDED.embedding_vector,
-                        model_name = EXCLUDED.model_name,
-                        updated_at = NOW()
+                        text_hash        = EXCLUDED.text_hash,
+                        model_name       = EXCLUDED.model_name,
+                        updated_at       = NOW()
                     """,
                     row["chunk_id"],
                     text_hashes[row["chunk_id"]],
@@ -101,7 +119,6 @@ async def embed_chunks(
                 )
                 embedded += 1
 
-    # Update document status
     if req.doc_id and embedded > 0:
         await conn.execute(
             "UPDATE documents SET status='embedded' WHERE doc_id=$1::uuid", req.doc_id

@@ -8,44 +8,99 @@ can return ranked chunks without a generated answer.
 from __future__ import annotations
 
 import json
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Any
+
+import httpx
 
 from config import get_settings
 
 _settings = get_settings()
 
-# ─── System prompt + few-shot ─────────────────────────────────────────────────
+# ─── Singleton clients — created once, reused across all requests ─────────────
+
+_ollama_client: httpx.AsyncClient | None = None
+_anthropic_client: Any = None
+_openai_client: Any = None
+
+
+def _get_ollama_client() -> httpx.AsyncClient:
+    global _ollama_client
+    if _ollama_client is None:
+        _ollama_client = httpx.AsyncClient(timeout=httpx.Timeout(600.0))
+    return _ollama_client
+
+
+def _get_anthropic_client():
+    global _anthropic_client
+    if _anthropic_client is None:
+        import anthropic
+        _anthropic_client = anthropic.AsyncAnthropic(api_key=_settings.ANTHROPIC_API_KEY)
+    return _anthropic_client
+
+
+def _get_openai_client():
+    global _openai_client
+    if _openai_client is None:
+        from openai import AsyncOpenAI
+        _openai_client = AsyncOpenAI(api_key=_settings.OPENAI_API_KEY)
+    return _openai_client
+
+
+# ─── System prompt ────────────────────────────────────────────────────────────
 
 _SYSTEM_PROMPT = """You are an enterprise document assistant.
 Your job is to answer questions based ONLY on the context documents provided.
 Rules:
 - If the answer is in the context, cite the source (document title + section).
-- If you cannot find the answer, say: "I don't have information about this in the indexed documents."
+- If the answer spans multiple sources, cite each one.
+- If you cannot find the answer, say exactly: "I don't have information about this in the indexed documents."
 - Be concise, factual, and professional.
-- Do not hallucinate or invent facts."""
+- Do not hallucinate or invent facts not present in the context.
+- When quoting figures, dates, or names, copy them exactly from the source."""
 
+# Domain-neutral few-shot grounded in financial/enterprise document style
 _FEW_SHOT = [
     {
         "role": "user",
-        "content": "Context:\n[Doc: HR Policy 2024, Section: Leave Policy]\nEmployees are entitled to 20 days paid leave per year.\n\nQuestion: How many leave days do employees get?",
+        "content": (
+            "Context:\n"
+            "[Doc: Q3 2024 Financial Report › Revenue Summary]\n"
+            "Total net revenue for Q3 2024 was $15.3 billion, a 9% increase year-over-year, "
+            "driven by growth in Card Member spending and net interest income.\n\n"
+            "Question: What was the net revenue and growth rate in Q3 2024?"
+        ),
     },
     {
         "role": "assistant",
-        "content": "According to the HR Policy 2024 (Leave Policy section), employees are entitled to **20 days of paid leave per year**.",
+        "content": (
+            "According to the **Q3 2024 Financial Report** (Revenue Summary), "
+            "total net revenue was **$15.3 billion**, representing a **9% year-over-year increase**, "
+            "driven by Card Member spending growth and net interest income."
+        ),
     },
 ]
+
+# Token budget for context: 8192 (num_ctx) minus ~300 for system+few-shot,
+# ~200 for question, and 1024 reserved for the model's output.
+_CONTEXT_TOKEN_BUDGET = 1200
 
 
 # ─── Public API ───────────────────────────────────────────────────────────────
 
 def build_prompt_messages(question: str, chunks: list[dict]) -> list[dict]:
-    """Construct the message list for any provider."""
+    """Construct the message list, trimming chunks to fit the context budget."""
+    fitted = _fit_chunks_to_budget(chunks)
+
     context_parts = []
-    for i, chunk in enumerate(chunks, 1):
+    for i, chunk in enumerate(fitted, 1):
         title = chunk.get("doc_title") or "Unknown Document"
         heading = chunk.get("parent_heading") or ""
         source = chunk.get("source") or ""
-        section_label = f"{title}" + (f" › {heading}" if heading else "") + (f" ({source})" if source else "")
+        section_label = (
+            title
+            + (f" › {heading}" if heading else "")
+            + (f" ({source})" if source else "")
+        )
         context_parts.append(f"[{i}] {section_label}\n{chunk['chunk_text']}")
 
     context_block = "\n\n---\n\n".join(context_parts)
@@ -55,6 +110,23 @@ def build_prompt_messages(question: str, chunks: list[dict]) -> list[dict]:
         *_FEW_SHOT,
         {"role": "user", "content": user_message},
     ]
+
+
+def _fit_chunks_to_budget(chunks: list[dict]) -> list[dict]:
+    """
+    Drop the lowest-ranked chunks that would overflow the context token budget.
+    Uses a rough 4-chars-per-token estimate to avoid importing tiktoken here.
+    Always keeps at least one chunk.
+    """
+    result: list[dict] = []
+    used = 0
+    for chunk in chunks:
+        estimate = max(1, len(chunk.get("chunk_text", "")) // 4)
+        if used + estimate > _CONTEXT_TOKEN_BUDGET and result:
+            break
+        result.append(chunk)
+        used += estimate
+    return result
 
 
 async def generate(
@@ -92,9 +164,7 @@ async def generate(
 # ─── Anthropic ────────────────────────────────────────────────────────────────
 
 async def _complete_anthropic(messages: list[dict]) -> str:
-    import anthropic
-
-    client = anthropic.AsyncAnthropic(api_key=_settings.ANTHROPIC_API_KEY)
+    client = _get_anthropic_client()
     resp = await client.messages.create(
         model=_settings.ANTHROPIC_MODEL,
         max_tokens=1024,
@@ -105,9 +175,7 @@ async def _complete_anthropic(messages: list[dict]) -> str:
 
 
 async def _stream_anthropic(messages: list[dict]) -> AsyncGenerator[str, None]:
-    import anthropic
-
-    client = anthropic.AsyncAnthropic(api_key=_settings.ANTHROPIC_API_KEY)
+    client = _get_anthropic_client()
     async with client.messages.stream(
         model=_settings.ANTHROPIC_MODEL,
         max_tokens=1024,
@@ -121,9 +189,7 @@ async def _stream_anthropic(messages: list[dict]) -> AsyncGenerator[str, None]:
 # ─── OpenAI ───────────────────────────────────────────────────────────────────
 
 async def _complete_openai(messages: list[dict]) -> str:
-    from openai import AsyncOpenAI
-
-    client = AsyncOpenAI(api_key=_settings.OPENAI_API_KEY)
+    client = _get_openai_client()
     system_msg = {"role": "system", "content": _SYSTEM_PROMPT}
     resp = await client.chat.completions.create(
         model=_settings.OPENAI_CHAT_MODEL,
@@ -134,9 +200,7 @@ async def _complete_openai(messages: list[dict]) -> str:
 
 
 async def _stream_openai(messages: list[dict]) -> AsyncGenerator[str, None]:
-    from openai import AsyncOpenAI
-
-    client = AsyncOpenAI(api_key=_settings.OPENAI_API_KEY)
+    client = _get_openai_client()
     system_msg = {"role": "system", "content": _SYSTEM_PROMPT}
     stream = await client.chat.completions.create(
         model=_settings.OPENAI_CHAT_MODEL,
@@ -153,45 +217,41 @@ async def _stream_openai(messages: list[dict]) -> AsyncGenerator[str, None]:
 # ─── Ollama ───────────────────────────────────────────────────────────────────
 
 async def _complete_ollama(messages: list[dict]) -> str:
-    import httpx
-
+    client = _get_ollama_client()
     full_messages = [{"role": "system", "content": _SYSTEM_PROMPT}, *messages]
-    async with httpx.AsyncClient(timeout=300) as client:
-        resp = await client.post(
-            f"{_settings.OLLAMA_BASE_URL}/api/chat",
-            json={
-                "model": _settings.OLLAMA_MODEL,
-                "messages": full_messages,
-                "stream": False,
-                "options": {"num_predict": 400, "num_ctx": 4096, "temperature": 0.1},
-            },
-        )
-        resp.raise_for_status()
-        return resp.json()["message"]["content"]
+    resp = await client.post(
+        f"{_settings.OLLAMA_BASE_URL}/api/chat",
+        json={
+            "model": _settings.OLLAMA_MODEL,
+            "messages": full_messages,
+            "stream": False,
+            "options": {"num_predict": 512, "num_ctx": 2048, "temperature": 0.1},
+        },
+    )
+    resp.raise_for_status()
+    return resp.json()["message"]["content"]
 
 
 async def _stream_ollama(messages: list[dict]) -> AsyncGenerator[str, None]:
-    import httpx
-
+    client = _get_ollama_client()
     full_messages = [{"role": "system", "content": _SYSTEM_PROMPT}, *messages]
-    async with httpx.AsyncClient(timeout=600) as client:
-        async with client.stream(
-            "POST",
-            f"{_settings.OLLAMA_BASE_URL}/api/chat",
-            json={
-                "model": _settings.OLLAMA_MODEL,
-                "messages": full_messages,
-                "stream": True,
-                "options": {"num_predict": 400, "num_ctx": 4096, "temperature": 0.1},
-            },
-        ) as resp:
-            resp.raise_for_status()
-            async for line in resp.aiter_lines():
-                if line:
-                    try:
-                        data = json.loads(line)
-                        content = data.get("message", {}).get("content", "")
-                        if content:
-                            yield content
-                    except json.JSONDecodeError:
-                        continue
+    async with client.stream(
+        "POST",
+        f"{_settings.OLLAMA_BASE_URL}/api/chat",
+        json={
+            "model": _settings.OLLAMA_MODEL,
+            "messages": full_messages,
+            "stream": True,
+            "options": {"num_predict": 512, "num_ctx": 2048, "temperature": 0.1},
+        },
+    ) as resp:
+        resp.raise_for_status()
+        async for line in resp.aiter_lines():
+            if line:
+                try:
+                    data = json.loads(line)
+                    content = data.get("message", {}).get("content", "")
+                    if content:
+                        yield content
+                except json.JSONDecodeError:
+                    continue

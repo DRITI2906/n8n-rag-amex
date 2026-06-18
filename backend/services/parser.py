@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import io
 import re
+from collections import defaultdict
 from datetime import datetime
 from typing import Any
 
@@ -63,7 +64,6 @@ def parse_document(content: bytes, mime_type: str, filename: str = "") -> Parsed
     elif mime_type in ("text/markdown", "text/x-markdown"):
         result = _parse_markdown(content)
     else:
-        # Fallback: plain text
         result = {"text": content.decode("utf-8", errors="replace"), "metadata": {}}
 
     text = _clean_text(result["text"])
@@ -90,7 +90,7 @@ def _parse_pdf(content: bytes) -> dict:
     import pdfplumber
 
     pages_text: list[str] = []
-    headings: list[str] = []
+    all_headings: list[str] = []
     metadata: dict = {}
 
     with pdfplumber.open(io.BytesIO(content)) as pdf:
@@ -100,19 +100,21 @@ def _parse_pdf(content: bytes) -> dict:
         for page in pdf.pages:
             text = page.extract_text(x_tolerance=2, y_tolerance=2) or ""
 
-            # Extract tables as markdown-style text
+            # Extract tables as markdown-style rows
             for table in page.extract_tables():
                 if not table:
                     continue
                 rows = [" | ".join(str(c) if c else "" for c in row) for row in table]
                 text += "\n\n" + "\n".join(rows)
 
+            # Detect large-font lines and inject them as ## headings
+            text = _inject_pdf_headings(page, text)
             pages_text.append(text)
 
-            # Heuristic: lines in ALL-CAPS or larger font size are headings
-            for word in (page.chars or []):
-                if word.get("size", 0) > 14 and word.get("text", "").strip():
-                    headings.append(word["text"].strip())
+            # Collect heading strings for metadata
+            for line in text.split("\n"):
+                if line.startswith("## "):
+                    all_headings.append(line[3:].strip())
 
     return {
         "text": "\n\n".join(pages_text),
@@ -120,8 +122,54 @@ def _parse_pdf(content: bytes) -> dict:
         "author": metadata.get("Author") or metadata.get("author"),
         "creation_date": _parse_pdf_date(metadata.get("CreationDate")),
         "modified_date": _parse_pdf_date(metadata.get("ModDate")),
-        "metadata": {"headings": list(dict.fromkeys(headings))},
+        "metadata": {"headings": list(dict.fromkeys(all_headings))},
     }
+
+
+def _inject_pdf_headings(page, extracted_text: str) -> str:
+    """
+    Scan the page's character stream to find large-font lines, then prefix
+    those lines with '## ' in the already-extracted text so the chunker
+    can split on them as Markdown headings.
+    """
+    chars = page.chars
+    if not chars:
+        return extracted_text
+
+    # Group chars by line: bucket by rounded top coordinate (3-pt tolerance)
+    line_buckets: dict[int, list] = defaultdict(list)
+    for ch in chars:
+        if ch.get("text", "").strip():
+            key = round(ch.get("top", 0) / 3) * 3
+            line_buckets[key].append(ch)
+
+    # Identify heading lines: average font size > 13 pt, reasonable text length
+    heading_strings: set[str] = set()
+    for bucket in line_buckets.values():
+        sizes = [c.get("size", 0) for c in bucket if c.get("size", 0) > 0]
+        if not sizes:
+            continue
+        avg_size = sum(sizes) / len(sizes)
+        if avg_size > 13:
+            # Sort by x-coordinate to reconstruct left-to-right reading order
+            text = "".join(
+                c["text"] for c in sorted(bucket, key=lambda c: c.get("x0", 0))
+            ).strip()
+            if 2 < len(text) < 200:
+                heading_strings.add(text)
+
+    if not heading_strings:
+        return extracted_text
+
+    # Prefix matching lines in the extracted text with ##
+    result_lines = []
+    for line in extracted_text.split("\n"):
+        stripped = line.strip()
+        if stripped in heading_strings and not stripped.startswith("#"):
+            result_lines.append(f"## {stripped}")
+        else:
+            result_lines.append(line)
+    return "\n".join(result_lines)
 
 
 def _parse_pdf_date(raw: str | None) -> datetime | None:
@@ -138,7 +186,6 @@ def _parse_pdf_date(raw: str | None) -> datetime | None:
 
 def _parse_docx(content: bytes) -> dict:
     from docx import Document
-    from docx.oxml.ns import qn
 
     doc = Document(io.BytesIO(content))
     parts: list[str] = []
@@ -147,9 +194,30 @@ def _parse_docx(content: bytes) -> dict:
     for para in doc.paragraphs:
         if not para.text.strip():
             continue
-        if para.style.name.startswith("Heading"):
+
+        style = para.style.name
+
+        if style.startswith("Heading"):
+            # Preserve heading level (Heading 1 → #, Heading 2 → ##, etc.)
+            level_match = re.search(r"\d+", style)
+            level = int(level_match.group()) if level_match else 2
+            hashes = "#" * min(level, 6)
             headings.append(para.text)
-            parts.append(f"\n## {para.text}\n")
+            parts.append(f"\n{hashes} {para.text}\n")
+
+        elif "List Number" in style:
+            # Detect nesting level from style name (e.g. "List Number 2")
+            level_match = re.search(r"\d+", style)
+            depth = int(level_match.group()) - 1 if level_match else 0
+            indent = "  " * depth
+            parts.append(f"{indent}1. {para.text}")
+
+        elif "List" in style:
+            level_match = re.search(r"\d+", style)
+            depth = int(level_match.group()) - 1 if level_match else 0
+            indent = "  " * depth
+            parts.append(f"{indent}- {para.text}")
+
         else:
             parts.append(para.text)
 
@@ -206,7 +274,6 @@ def _parse_html(content: bytes) -> dict:
 
     soup = BeautifulSoup(content, "lxml")
 
-    # Remove noise
     for tag in soup(["script", "style", "nav", "footer", "aside"]):
         tag.decompose()
 
@@ -221,7 +288,6 @@ def _parse_html(content: bytes) -> dict:
 
 def _parse_markdown(content: bytes) -> dict:
     text = content.decode("utf-8", errors="replace")
-    # Extract title from first H1
     first_h1 = re.search(r"^#\s+(.+)$", text, re.MULTILINE)
     return {
         "text": text,
@@ -233,7 +299,6 @@ def _parse_markdown(content: bytes) -> dict:
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
 def _clean_text(text: str) -> str:
-    # Normalise whitespace
     text = re.sub(r"\r\n", "\n", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     text = re.sub(r"[ \t]+", " ", text)
@@ -242,8 +307,7 @@ def _clean_text(text: str) -> str:
 
 def _detect_language(text: str) -> str:
     try:
-        sample = text[:1000]
-        return detect(sample)
+        return detect(text[:1000])
     except LangDetectException:
         return "en"
 

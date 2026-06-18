@@ -1,4 +1,4 @@
-export default function SourceCard({ source, index }) {
+export default function SourceCard({ source, index, normalizedScore }) {
   const sourceIcons = {
     google_drive: '📁',
     slack: '💬',
@@ -16,7 +16,7 @@ export default function SourceCard({ source, index }) {
         <span className="source-icon">{icon}</span>
         <span className="source-index">[{index}]</span>
         <span className="source-title">{source.doc_title || 'Untitled Document'}</span>
-        <span className="source-score">{(source.relevance_score * 100).toFixed(0)}%</span>
+        <span className="source-score">{((normalizedScore ?? 1) * 100).toFixed(0)}%</span>
       </div>
       {source.parent_heading && (
         <div className="source-section">§ {source.parent_heading}</div>

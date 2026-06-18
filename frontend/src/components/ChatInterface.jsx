@@ -167,9 +167,17 @@ export default function ChatInterface({ onNewQuery }) {
                   <div className="sources-section">
                     <div className="sources-label">Sources ({msg.sources.length})</div>
                     <div className="sources-grid">
-                      {msg.sources.map((src, j) => (
-                        <SourceCard key={j} source={src} index={j + 1} />
-                      ))}
+                      {(() => {
+                        const maxScore = Math.max(...msg.sources.map(s => s.relevance_score))
+                        return msg.sources.map((src, j) => (
+                          <SourceCard
+                            key={j}
+                            source={src}
+                            index={j + 1}
+                            normalizedScore={maxScore > 0 ? src.relevance_score / maxScore : 0}
+                          />
+                        ))
+                      })()}
                     </div>
                   </div>
                 )}

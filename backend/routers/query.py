@@ -3,9 +3,11 @@ POST /query — full RAG chain: retrieve chunks → call LLM → stream answer.
 Supports SSE streaming and non-streaming modes.
 Logs every query to the query_logs table.
 Also exposes POST /query/feedback for thumbs-up/down.
+Also exposes GET /query/cache/stats and DELETE /query/cache for cache management.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
@@ -13,7 +15,6 @@ from datetime import date
 
 import asyncpg
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
@@ -21,6 +22,7 @@ from config import get_settings
 from db.connection import get_conn, get_pool
 from services.retriever import search, SearchResult
 from services.llm import generate
+from services.cache import get_cache
 
 router = APIRouter()
 _settings = get_settings()
@@ -31,8 +33,8 @@ _settings = get_settings()
 class QueryRequest(BaseModel):
     question: str
     top_k: int = 5
-    use_local_llm: bool | None = None   # None = use LLM_PROVIDER env default
-    provider: str | None = None         # override: "ollama" | "anthropic" | "openai"
+    use_local_llm: bool | None = None
+    provider: str | None = None
     stream: bool = True
     user_id: str | None = None
     source: str | None = None
@@ -58,6 +60,7 @@ class QueryResponse(BaseModel):
     retrieval_time_ms: int
     generation_time_ms: int
     model_used: str
+    cache_hit: bool = False
 
 
 class FeedbackRequest(BaseModel):
@@ -74,6 +77,49 @@ async def query_docs(
     req: QueryRequest,
     conn: asyncpg.Connection = Depends(get_conn),
 ):
+    provider = _resolve_provider(req)
+    model_used = _resolve_model_name(provider)
+
+    cache = get_cache()
+    cache_key = cache.make_key(
+        req.question, req.top_k, req.source, req.doc_id,
+        provider, req.date_from, req.date_to,
+    )
+    cached = cache.get(cache_key)
+
+    # ── Cache hit ─────────────────────────────────────────────────────────────
+    if cached:
+        if req.stream:
+            return EventSourceResponse(
+                _stream_cached(cached, model_used, req.user_id, req.top_k)
+            )
+        query_id = str(uuid.uuid4())
+        asyncio.create_task(
+            _log_query_with_conn(
+                question=req.question,
+                answer=cached["answer"],
+                sources=cached["sources"],
+                retrieval_ms=cached["retrieval_ms"],
+                generation_ms=cached["generation_ms"],
+                model_used=model_used,
+                top_k=req.top_k,
+                user_id=req.user_id,
+                query_id=query_id,
+            )
+        )
+        return QueryResponse(
+            query_id=query_id,
+            question=req.question,
+            answer=cached["answer"],
+            sources=[SourceRef(**_src_ref_fields(c)) for c in cached["sources"]],
+            retrieval_time_ms=cached["retrieval_ms"],
+            generation_time_ms=cached["generation_ms"],
+            model_used=model_used,
+            cache_hit=True,
+        )
+
+    # ── Cache miss — full pipeline ────────────────────────────────────────────
+
     # 1. Retrieval
     t0 = time.monotonic()
     chunks: list[SearchResult] = await search(
@@ -101,29 +147,17 @@ async def query_docs(
         for c in chunks
     ]
 
-    # Determine provider
-    if req.provider:
-        provider = req.provider
-    elif req.use_local_llm is False:
-        provider = "anthropic" if _settings.ANTHROPIC_API_KEY else "openai"
-    elif req.use_local_llm is True:
-        provider = "ollama"
-    else:
-        provider = _settings.LLM_PROVIDER
-
-    model_used = _resolve_model_name(provider)
-
     # 2. Generation — streaming
     if req.stream:
         return EventSourceResponse(
             _stream_response(
-                conn=conn,
                 question=req.question,
                 chunks=chunk_dicts,
                 retrieval_ms=retrieval_ms,
                 provider=provider,
                 model_used=model_used,
                 user_id=req.user_id,
+                cache_key=cache_key,
             )
         )
 
@@ -135,16 +169,27 @@ async def query_docs(
     answer = result if isinstance(result, str) else ""
     fallback = not answer
 
-    query_id = await _log_query(
-        conn=conn,
-        question=req.question,
-        answer=answer,
-        sources=chunk_dicts,
-        retrieval_ms=retrieval_ms,
-        generation_ms=generation_ms,
-        model_used=model_used,
-        top_k=req.top_k,
-        user_id=req.user_id,
+    if not fallback:
+        cache.set(cache_key, {
+            "answer": answer,
+            "sources": chunk_dicts,
+            "retrieval_ms": retrieval_ms,
+            "generation_ms": generation_ms,
+        })
+
+    query_id = str(uuid.uuid4())
+    asyncio.create_task(
+        _log_query_with_conn(
+            question=req.question,
+            answer=answer,
+            sources=chunk_dicts,
+            retrieval_ms=retrieval_ms,
+            generation_ms=generation_ms,
+            model_used=model_used,
+            top_k=req.top_k,
+            user_id=req.user_id,
+            query_id=query_id,
+        )
     )
 
     if fallback:
@@ -154,32 +199,21 @@ async def query_docs(
         query_id=query_id,
         question=req.question,
         answer=answer,
-        sources=[
-            SourceRef(
-                chunk_id=c["chunk_id"],
-                doc_id=c["doc_id"],
-                doc_title=c["doc_title"],
-                source=c["source"],
-                parent_heading=c["parent_heading"],
-                relevance_score=c["relevance_score"],
-            )
-            for c in chunk_dicts
-        ],
+        sources=[SourceRef(**_src_ref_fields(c)) for c in chunk_dicts],
         retrieval_time_ms=retrieval_ms,
         generation_time_ms=generation_ms,
         model_used=model_used,
+        cache_hit=False,
     )
 
 
-# ─── SSE streaming ────────────────────────────────────────────────────────────
+# ─── SSE streaming — cache miss ───────────────────────────────────────────────
 
 async def _stream_response(
-    conn, question, chunks, retrieval_ms, provider, model_used, user_id
+    question, chunks, retrieval_ms, provider, model_used, user_id, cache_key,
 ):
-    """Yields SSE events: token by token, then a final 'done' event with metadata."""
     query_id = str(uuid.uuid4())
 
-    # Send retrieval metadata first
     yield {
         "event": "metadata",
         "data": json.dumps({
@@ -187,6 +221,7 @@ async def _stream_response(
             "sources": chunks,
             "retrieval_time_ms": retrieval_ms,
             "model_used": model_used,
+            "cache_hit": False,
         }),
     }
 
@@ -202,14 +237,21 @@ async def _stream_response(
         else:
             full_answer = stream or ""
             yield {"event": "token", "data": full_answer}
-    except Exception as e:
+    except Exception:
         full_answer = "Could not generate an answer — here are the most relevant document sections found."
         yield {"event": "token", "data": full_answer}
 
     generation_ms = int((time.monotonic() - t1) * 1000)
 
-    # Acquire a fresh connection — the FastAPI DI conn is released once the
-    # handler returns the EventSourceResponse, before the generator finishes.
+    # Store in cache only on successful generation
+    if full_answer and "Could not generate" not in full_answer:
+        get_cache().set(cache_key, {
+            "answer": full_answer,
+            "sources": chunks,
+            "retrieval_ms": retrieval_ms,
+            "generation_ms": generation_ms,
+        })
+
     try:
         async with get_pool().acquire() as log_conn:
             await _log_query(
@@ -228,6 +270,45 @@ async def _stream_response(
         print(f"[query] Failed to log query: {e}")
 
     yield {"event": "done", "data": json.dumps({"generation_time_ms": generation_ms})}
+
+
+# ─── SSE streaming — cache hit ────────────────────────────────────────────────
+
+async def _stream_cached(cached: dict, model_used: str, user_id: str | None, top_k: int):
+    query_id = str(uuid.uuid4())
+
+    yield {
+        "event": "metadata",
+        "data": json.dumps({
+            "query_id": query_id,
+            "sources": cached["sources"],
+            "retrieval_time_ms": cached["retrieval_ms"],
+            "model_used": model_used,
+            "cache_hit": True,
+        }),
+    }
+
+    yield {"event": "token", "data": cached["answer"]}
+
+    # Log cache hit as a near-zero-latency query
+    try:
+        async with get_pool().acquire() as log_conn:
+            await _log_query(
+                conn=log_conn,
+                question="",   # already in the original log entry
+                answer=cached["answer"],
+                sources=cached["sources"],
+                retrieval_ms=0,
+                generation_ms=0,
+                model_used=model_used,
+                top_k=top_k,
+                user_id=user_id,
+                query_id=query_id,
+            )
+    except Exception as e:
+        print(f"[query] Failed to log cached query: {e}")
+
+    yield {"event": "done", "data": json.dumps({"generation_time_ms": 0, "cache_hit": True})}
 
 
 # ─── Feedback endpoint ────────────────────────────────────────────────────────
@@ -250,7 +331,30 @@ async def submit_feedback(
     return {"status": "recorded"}
 
 
+# ─── Cache management endpoints ───────────────────────────────────────────────
+
+@router.get("/cache/stats")
+async def cache_stats():
+    return get_cache().stats
+
+
+@router.delete("/cache")
+async def clear_cache():
+    get_cache().clear()
+    return {"status": "cleared"}
+
+
 # ─── Helpers ─────────────────────────────────────────────────────────────────
+
+def _resolve_provider(req: QueryRequest) -> str:
+    if req.provider:
+        return req.provider
+    if req.use_local_llm is False:
+        return "anthropic" if _settings.ANTHROPIC_API_KEY else "openai"
+    if req.use_local_llm is True:
+        return "ollama"
+    return _settings.LLM_PROVIDER
+
 
 def _resolve_model_name(provider: str) -> str:
     s = _settings
@@ -259,6 +363,39 @@ def _resolve_model_name(provider: str) -> str:
     if provider == "openai":
         return s.OPENAI_CHAT_MODEL
     return f"ollama/{s.OLLAMA_MODEL}"
+
+
+def _src_ref_fields(c: dict) -> dict:
+    return {
+        "chunk_id": c["chunk_id"],
+        "doc_id": c["doc_id"],
+        "doc_title": c["doc_title"],
+        "source": c["source"],
+        "parent_heading": c["parent_heading"],
+        "relevance_score": c["relevance_score"],
+    }
+
+
+async def _log_query_with_conn(
+    question, answer, sources, retrieval_ms, generation_ms,
+    model_used, top_k, user_id, query_id: str,
+) -> None:
+    try:
+        async with get_pool().acquire() as conn:
+            await _log_query(
+                conn=conn,
+                question=question,
+                answer=answer,
+                sources=sources,
+                retrieval_ms=retrieval_ms,
+                generation_ms=generation_ms,
+                model_used=model_used,
+                top_k=top_k,
+                user_id=user_id,
+                query_id=query_id,
+            )
+    except Exception as e:
+        print(f"[query] Failed to log query: {e}")
 
 
 async def _log_query(
