@@ -17,13 +17,43 @@
     },
     {
       "parameters": {
-        "jsCode": "const body = $json.body || $json;\nif (!body.query_id) throw new Error('Missing query_id');\nif (![1,-1].includes(body.rating)) throw new Error('rating must be 1 or -1');\nreturn [{ json: { query_id: body.query_id, rating: body.rating, user_id: body.user_id || 'anonymous', comment: body.comment || '' } }];"
+        "jsCode": "const body = $json.body || $json;\nif (!body.query_id) {\n  return [{ json: { _validationError: true, errorMessage: 'Missing query_id', statusCode: 400 } }];\n}\nif (![1, -1].includes(body.rating)) {\n  return [{ json: { _validationError: true, errorMessage: 'rating must be 1 or -1', statusCode: 400 } }];\n}\nreturn [{ json: { query_id: body.query_id, rating: body.rating, user_id: body.user_id || 'anonymous', comment: body.comment || '' } }];"
       },
       "id": "node-validate-feedback",
       "name": "Validate Feedback",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [300, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $json._validationError }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ]
+        }
+      },
+      "id": "node-validate-feedback-check",
+      "name": "Has Validation Error?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [500, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ error: $json.errorMessage }) }}",
+        "options": { "responseCode": 400 }
+      },
+      "id": "node-respond-validation-error",
+      "name": "Respond – Validation Error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [700, 400]
     },
     {
       "parameters": {
@@ -41,7 +71,7 @@
       "name": "Store Feedback via API",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [500, 300]
+      "position": [700, 200]
     },
     {
       "parameters": {
@@ -59,7 +89,7 @@
       "name": "Store Succeeded?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
-      "position": [700, 300]
+      "position": [900, 200]
     },
     {
       "parameters": {
@@ -71,7 +101,7 @@
       "name": "Respond OK",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1,
-      "position": [900, 200]
+      "position": [1100, 100]
     },
     {
       "parameters": {
@@ -83,7 +113,7 @@
       "name": "Respond – Store Error",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1,
-      "position": [900, 400]
+      "position": [1100, 300]
     },
     {
       "parameters": {
@@ -109,7 +139,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const items = $input.all();\n// Deduplicate by query_id, keeping the latest rating per query\nconst ratingMap = new Map();\nconst questionMap = new Map();\nfor (const item of items) {\n  ratingMap.set(item.json.query_id, item.json.rating);\n  questionMap.set(item.json.query_id, item.json.question);\n}\nconst total = ratingMap.size;\nconst uniqueRatings = Array.from(ratingMap.values());\nconst thumbsUp = uniqueRatings.filter(r => r === 1).length;\nconst thumbsDown = uniqueRatings.filter(r => r === -1).length;\nconst satisfaction = total > 0 ? Math.round((thumbsUp / total) * 100) : 0;\n\nconst failMap = {};\nfor (const [queryId, rating] of ratingMap.entries()) {\n  if (rating === -1) {\n    const q = questionMap.get(queryId);\n    failMap[q] = (failMap[q] || 0) + 1;\n  }\n}\nconst topFailing = Object.entries(failMap).sort((a,b) => b[1]-a[1]).slice(0, 5);\n\nreturn [{ json: { total, thumbsUp, thumbsDown, satisfaction, topFailing } }];"
+        "jsCode": "const items = $input.all();\nconst ratingMap = new Map();\nconst questionMap = new Map();\nfor (const item of items) {\n  ratingMap.set(item.json.query_id, item.json.rating);\n  questionMap.set(item.json.query_id, item.json.question);\n}\nconst total = ratingMap.size;\nconst uniqueRatings = Array.from(ratingMap.values());\nconst thumbsUp = uniqueRatings.filter(r => r === 1).length;\nconst thumbsDown = uniqueRatings.filter(r => r === -1).length;\nconst satisfaction = total > 0 ? Math.round((thumbsUp / total) * 100) : 0;\n\nconst failMap = {};\nfor (const [queryId, rating] of ratingMap.entries()) {\n  if (rating === -1) {\n    const q = questionMap.get(queryId);\n    failMap[q] = (failMap[q] || 0) + 1;\n  }\n}\nconst topFailing = Object.entries(failMap).sort((a,b) => b[1]-a[1]).slice(0, 5);\n\nreturn [{ json: { total, thumbsUp, thumbsDown, satisfaction, topFailing } }];"
       },
       "id": "node-analyse",
       "name": "Analyse Feedback",
@@ -135,7 +165,13 @@
   ],
   "connections": {
     "POST /feedback Webhook": { "main": [[{ "node": "Validate Feedback", "type": "main", "index": 0 }]] },
-    "Validate Feedback": { "main": [[{ "node": "Store Feedback via API", "type": "main", "index": 0 }]] },
+    "Validate Feedback": { "main": [[{ "node": "Has Validation Error?", "type": "main", "index": 0 }]] },
+    "Has Validation Error?": {
+      "main": [
+        [{ "node": "Respond – Validation Error", "type": "main", "index": 0 }],
+        [{ "node": "Store Feedback via API", "type": "main", "index": 0 }]
+      ]
+    },
     "Store Feedback via API": { "main": [[{ "node": "Store Succeeded?", "type": "main", "index": 0 }]] },
     "Store Succeeded?": {
       "main": [

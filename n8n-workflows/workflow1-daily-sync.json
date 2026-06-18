@@ -63,7 +63,7 @@
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            { "name": "Authorization", "value": "=Bearer {{ $env.SLACK_BOT_TOKEN }}" }
+            { "name": "Authorization", "value": "={{ `Bearer ${$env.SLACK_BOT_TOKEN}` }}" }
           ]
         },
         "options": {}
